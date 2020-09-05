@@ -4,6 +4,7 @@ import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 from tensorflow import keras
 from datetime import datetime
+import sys, getopt
 
 # TODO: try this with lambda callback
 class EpochTime(tf.keras.callbacks.Callback):
@@ -19,17 +20,32 @@ class EpochTime(tf.keras.callbacks.Callback):
         print("\nEpoch {} Time: {}".format(epoch, self.end - self.start))
         tf.summary.scalar('epoch time', data=(self.end - self.start), step=epoch)
 
-def create_model(input_shape):
+def create_model(input_shape, model_arch=0):
     X_input = tf.keras.layers.Input(input_shape)
 
-    X = tf.keras.layers.Conv2D(16, (3,3), strides=(1,1), activation="relu")(X_input)
-    X = tf.keras.layers.MaxPooling2D()(X)
+    print("model arch:", str(model_arch))
 
-    X = tf.keras.layers.Conv2D(32, (3,3), strides=(1,1), activation="relu")(X)
-    X = tf.keras.layers.MaxPooling2D()(X)
+    if model_arch == 0:
+        X = tf.keras.layers.Conv2D(16, (3,3), strides=(1,1), activation="relu")(X_input)
+        X = tf.keras.layers.MaxPooling2D()(X)
 
-    X = tf.keras.layers.Conv2D(64, (3,3), strides=(1,1), activation="relu")(X)
-    X = tf.keras.layers.MaxPooling2D()(X)
+        X = tf.keras.layers.Conv2D(32, (3,3), strides=(1,1), activation="relu")(X)
+        X = tf.keras.layers.MaxPooling2D()(X)
+
+        X = tf.keras.layers.Conv2D(64, (3,3), strides=(1,1), activation="relu")(X)
+        X = tf.keras.layers.MaxPooling2D()(X)
+    elif model_arch == 1:
+        X = tf.keras.layers.Conv2D(32, (3,3), strides=(1,1), activation="relu")(X_input)
+        X = tf.keras.layers.MaxPooling2D()(X)
+
+        X = tf.keras.layers.Conv2D(32, (3,3), strides=(1,1), activation="relu")(X)
+        X = tf.keras.layers.MaxPooling2D()(X)
+
+        X = tf.keras.layers.Conv2D(32, (3,3), strides=(1,1), activation="relu")(X)
+        X = tf.keras.layers.MaxPooling2D()(X)
+    else:
+        print("Not a legitimate model")
+        sys.exit(2)
 
     X = tf.keras.layers.Flatten()(X)
     
@@ -66,11 +82,11 @@ def get_data(num_gpus):
 
     return train_dataset, dev_dataset, test_dataset
 
-def train_model_virtual_gpus(num_gpus):
+def train_model_virtual_gpus(num_gpus, model_arch):
     gpus = tf.config.list_physical_devices("GPU")
     if gpus:
         try:
-            tf.config.set_logical_device_configuration( # TODO: try this!!!
+            tf.config.set_logical_device_configuration(
                 gpus[0],
                 [tf.config.LogicalDeviceConfiguration(memory_limit=512) for i in range(num_gpus)]
             )
@@ -92,7 +108,7 @@ def train_model_virtual_gpus(num_gpus):
             tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logdir)
 
             with strategy.scope():
-                model = create_model((224,224,3))
+                model = create_model((224,224,3), model_arch=model_arch)
                 model.compile(optimizer=tf.keras.optimizers.Adam(0.03), 
                             loss=tf.keras.losses.BinaryCrossentropy(from_logits=True), # from_logits True because haven't applied softmax yet (this is apparently more numerically stable)
                             metrics=["accuracy"])
@@ -110,7 +126,7 @@ def train_model_virtual_gpus(num_gpus):
         except RuntimeError as e:
             print(e)
 
-def train_model_physical_gpus():
+def train_model_physical_gpus(model_arch):
     strategy = tf.distribute.MirroredStrategy()
     print("Num replicas in sync: {}".format(strategy.num_replicas_in_sync))
 
@@ -122,7 +138,7 @@ def train_model_physical_gpus():
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logdir)
 
     with strategy.scope():
-        model = create_model((224,224,3))
+        model = create_model((224,224,3), model_arch=model_arch)
         model.compile(optimizer=tf.keras.optimizers.Adam(), 
                     loss=tf.keras.losses.BinaryCrossentropy(from_logits=True), 
                     metrics=["accuracy"])
@@ -141,13 +157,28 @@ def train_model_physical_gpus():
     print("\n")
 
 if __name__ == '__main__':
-    
-    # num_of_gpus = [1, 2, 4, 6]
-    # for num_gpus in num_of_gpus:
-    #     p = multiprocessing.Process(target=train_model_virtual_gpus, args=(num_gpus,))
-    #     p.start()
-    #     p.join()
-    
-    p = multiprocessing.Process(target=train_model_physical_gpus)
-    p.start()
-    p.join()
+    split_one_gpu = False
+    model_arch = 0
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "", ["splitonegpu", "modelarch="])
+    except getopt.GetoptError as e:
+        print(e)
+        sys.exit(2)
+
+    for opt, arg in opts:
+        if opt == "--splitonegpu":
+            split_one_gpu = arg
+        elif opt == "--modelarch":
+            model_arch = int(arg)
+
+    if split_one_gpu:
+        num_of_gpus = [1, 2, 4, 6]
+        for num_gpus in num_of_gpus:
+            p = multiprocessing.Process(target=train_model_virtual_gpus, args=(num_gpus, model_arch))
+            p.start()
+            p.join()
+    else:
+        p = multiprocessing.Process(target=train_model_physical_gpus, args=(model_arch,))
+        p.start()
+        p.join()
